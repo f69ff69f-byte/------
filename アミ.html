@@ -1,0 +1,996 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Calendar as CalendarIcon, 
+  Users, 
+  Plus, 
+  Clock, 
+  MapPin, 
+  ChevronLeft, 
+  ChevronRight, 
+  UserPlus, 
+  Filter, 
+  Grid, 
+  List, 
+  Trash2,
+  Search,
+  Trophy,
+  Car,
+  GraduationCap,
+  Bell,
+  Edit3,
+  UserCheck,
+  Loader2
+} from 'lucide-react';
+
+// ★ ステップ2で取得したGASのウェブアプリURLを設定してください
+const GAS_API_URL = "https://script.google.com/macros/s/AKfycbzdfPxJUCP9Ytunu21vHvn99khseGGcWjcuvDmqKQ68Nd9e3FJxSLUCRpAHDd-j5efPqA/exec";
+
+// 学年定義（小学生のみ）
+const GRADES = ['小1', '小2', '小3', '小4', '小5', '小6'];
+
+// イベント種別定義
+const EVENT_TYPES = [
+  { id: 'match', name: '公式戦・練習試合', color: 'bg-emerald-600 text-white', badgeBg: 'bg-emerald-50 border-emerald-200 text-emerald-800' },
+  { id: 'practice', name: '通常練習', color: 'bg-blue-600 text-white', badgeBg: 'bg-blue-50 border-blue-200 text-blue-800' },
+  { id: 'expedition', name: '遠征・合宿', color: 'bg-amber-600 text-white', badgeBg: 'bg-amber-50 border-amber-200 text-amber-800' },
+  { id: 'event', name: 'イベント・行事', color: 'bg-purple-600 text-white', badgeBg: 'bg-purple-50 border-purple-200 text-purple-800' },
+];
+
+// 予定ステータス定義
+const STATUS_TYPES = [
+  { id: 'normal', name: '通常開催', badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300', cardBg: 'bg-white', alert: false },
+  { id: 'urgent', name: '急ぎ出欠回答求む', badgeClass: 'bg-amber-100 text-amber-900 border-amber-300 font-black animate-pulse', cardBg: 'bg-amber-50/70 border-amber-300', alert: true },
+  { id: 'cancelled', name: '練習中止', badgeClass: 'bg-rose-100 text-rose-800 border-rose-300 font-black', cardBg: 'bg-rose-50/70 border-rose-300', alert: true },
+  { id: 'changed', name: '時間・会場等変更あり', badgeClass: 'bg-sky-100 text-sky-900 border-sky-300 font-bold', cardBg: 'bg-sky-50/70 border-sky-300', alert: false },
+];
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('events'); // 'events' | 'member_batch' | 'members'
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'calendar'
+  const [selectedEventId, setSelectedEventId] = useState('');
+  const [selectedMemberForBatch, setSelectedMemberForBatch] = useState('');
+  
+  const [calendarDate, setCalendarDate] = useState(new Date(2026, 10, 1));
+
+  // データ管理
+  const [members, setMembers] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+
+  // フィルター
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedGradeFilter, setSelectedGradeFilter] = useState('ALL');
+  const [selectedTypeFilter, setSelectedTypeFilter] = useState('ALL');
+
+  // モーダル
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [isMemberModalOpen, setIsMemberModalOpen] = useState(false);
+  const [editingEvent, setEditingEvent] = useState(null);
+
+  const attendancePanelRef = useRef(null);
+
+  // 新規登録フォーム用
+  const [newEvent, setNewEvent] = useState({
+    title: '',
+    type: 'practice',
+    status: 'normal',
+    date: '2026-11-01',
+    startTime: '17:00',
+    endTime: '19:00',
+    location: '',
+    targetGrades: ['小5'],
+    description: ''
+  });
+
+  const [newMember, setNewMember] = useState({
+    playerName: '',
+    kana: '',
+    grade: '小5',
+    parentName: ''
+  });
+
+  // 初回データ読み込み (GASから取得)
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const fetchData = async () => {
+    if (!GAS_API_URL || GAS_API_URL.includes("ここに")) {
+      setLoading(false);
+      return;
+    }
+    try {
+      setLoading(true);
+      const res = await fetch(GAS_API_URL);
+      const data = await res.json();
+      if (data.members && data.events) {
+        setMembers(data.members);
+        setEvents(data.events);
+        if (data.events.length > 0 && !selectedEventId) {
+          setSelectedEventId(data.events[0].id);
+        }
+        if (data.members.length > 0 && !selectedMemberForBatch) {
+          setSelectedMemberForBatch(data.members[0].id);
+        }
+      }
+    } catch (err) {
+      console.error("データ取得失敗:", err);
+      alert("スプレッドシートからのデータ取得に失敗しました。URLを確認してください。");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // GASへPOSTリクエストを送信するヘルパー
+  const postToGAS = async (payload) => {
+    if (!GAS_API_URL || GAS_API_URL.includes("ここに")) return;
+    try {
+      setSyncing(true);
+      await fetch(GAS_API_URL, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+    } catch (err) {
+      console.error("データ送信失敗:", err);
+      alert("データの保存に失敗しました。");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // 緊急お知らせの抽出
+  const alertEvents = useMemo(() => {
+    return events.filter(e => e.status === 'urgent' || e.status === 'cancelled');
+  }, [events]);
+
+  const getTargetMembersForEvent = (event) => {
+    if (!event || !event.targetGrades) return [];
+    return members.filter(m => event.targetGrades.includes(m.grade));
+  };
+
+  const handleSelectEvent = (eventId) => {
+    setSelectedEventId(eventId);
+    if (activeTab !== 'events') setActiveTab('events');
+    setTimeout(() => {
+      if (attendancePanelRef.current) {
+        attendancePanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 50);
+  };
+
+  const calendarGrid = useMemo(() => {
+    const year = calendarDate.getFullYear();
+    const month = calendarDate.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+    const blanks = Array(firstDay).fill(null);
+    return { year, month: month + 1, days, blanks };
+  }, [calendarDate]);
+
+  const getAttendanceSummary = (event) => {
+    const targetMembers = getTargetMembersForEvent(event);
+    const summary = { attending_car: 0, attending: 0, absent: 0, pending: 0, total: targetMembers.length };
+    
+    targetMembers.forEach(member => {
+      const status = event.attendance?.[member.id] || 'attending';
+      if (status === 'attending_car') summary.attending_car++;
+      else if (status === 'attending') summary.attending++;
+      else if (status === 'absent') summary.absent++;
+      else summary.pending++;
+    });
+    return summary;
+  };
+
+  const filteredEvents = useMemo(() => {
+    return events.filter(ev => {
+      const matchesSearch = ev.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            ev.location.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            ev.description.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesGrade = selectedGradeFilter === 'ALL' || ev.targetGrades.includes(selectedGradeFilter);
+      const matchesType = selectedTypeFilter === 'ALL' || ev.type === selectedTypeFilter;
+      return matchesSearch && matchesGrade && matchesType;
+    });
+  }, [events, searchQuery, selectedGradeFilter, selectedTypeFilter]);
+
+  // 出欠ステータス変更
+  const updateAttendance = (eventId, memberId, status) => {
+    setEvents(prev => prev.map(ev => {
+      if (ev.id === eventId) {
+        return {
+          ...ev,
+          attendance: { ...ev.attendance, [memberId]: status }
+        };
+      }
+      return ev;
+    }));
+    postToGAS({ action: 'updateAttendance', eventId, memberId, status });
+  };
+
+  const selectedEvent = useMemo(() => {
+    return events.find(e => e.id === selectedEventId) || events[0];
+  }, [events, selectedEventId]);
+
+  const currentTargetMembers = useMemo(() => {
+    return getTargetMembersForEvent(selectedEvent);
+  }, [selectedEvent, members]);
+
+  const eventsForSelectedMember = useMemo(() => {
+    const member = members.find(m => m.id === selectedMemberForBatch);
+    if (!member) return [];
+    return events.filter(e => e.targetGrades.includes(member.grade));
+  }, [events, members, selectedMemberForBatch]);
+
+  // イベント保存
+  const handleSaveEvent = (e) => {
+    e.preventDefault();
+    if (!newEvent.title) return;
+
+    let eventToSave;
+    if (editingEvent) {
+      eventToSave = { ...newEvent, id: editingEvent.id };
+      setEvents(events.map(ev => ev.id === editingEvent.id ? { ...eventToSave, attendance: ev.attendance } : ev));
+      setEditingEvent(null);
+    } else {
+      const defaultAtt = {};
+      members.forEach(m => { defaultAtt[m.id] = 'attending'; });
+      eventToSave = { ...newEvent, id: `e_${Date.now()}`, attendance: defaultAtt };
+      setEvents([eventToSave, ...events]);
+      setSelectedEventId(eventToSave.id);
+    }
+    setIsEventModalOpen(false);
+    postToGAS({ action: 'saveEvent', event: eventToSave });
+
+    setNewEvent({
+      title: '', type: 'practice', status: 'normal', date: '2026-11-01',
+      startTime: '17:00', endTime: '19:00', location: '', targetGrades: ['小5'], description: ''
+    });
+  };
+
+  // メンバー追加
+  const handleCreateMember = (e) => {
+    e.preventDefault();
+    if (!newMember.playerName) return;
+
+    const colors = ['bg-emerald-600', 'bg-blue-600', 'bg-teal-600', 'bg-indigo-600', 'bg-amber-600', 'bg-rose-600'];
+    const memberObj = {
+      ...newMember,
+      id: `m_${Date.now()}`,
+      color: colors[members.length % colors.length]
+    };
+
+    setEvents(events.map(ev => ({
+      ...ev,
+      attendance: { ...ev.attendance, [memberObj.id]: 'attending' }
+    })));
+
+    setMembers([...members, memberObj]);
+    setIsMemberModalOpen(false);
+    postToGAS({ action: 'saveMember', member: memberObj });
+
+    setNewMember({ playerName: '', kana: '', grade: '小5', parentName: '' });
+  };
+
+  // イベント削除
+  const handleDeleteEvent = (id) => {
+    if (confirm('この予定を削除しますか？')) {
+      const nextEvents = events.filter(e => e.id !== id);
+      setEvents(nextEvents);
+      if (nextEvents.length > 0) setSelectedEventId(nextEvents[0].id);
+      postToGAS({ action: 'deleteEvent', id });
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center">
+        <Loader2 className="w-10 h-10 animate-spin text-emerald-400 mb-3" />
+        <p className="font-bold text-sm">Googleスプレッドシートからデータを読み込んでいます...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-800 flex flex-col font-sans pb-10">
+      {/* ヘッダー */}
+      <header className="bg-slate-900 text-white sticky top-0 z-30 shadow-md border-b border-slate-800">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3">
+          <div className="flex flex-col gap-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-emerald-400 text-slate-950 flex items-center justify-center font-black text-lg shadow-inner shrink-0">
+                  ⚽
+                </div>
+                <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white leading-tight">
+                  アミーゴ澄川
+                </h1>
+              </div>
+              {syncing && (
+                <div className="flex items-center gap-2 bg-slate-800 px-3 py-1 rounded-full text-xs text-emerald-400 border border-slate-700">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>同期中...</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsMemberModalOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-all flex items-center gap-1.5"
+                >
+                  <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>選手登録</span>
+                </button>
+                <button
+                  onClick={() => { setEditingEvent(null); setIsEventModalOpen(true); }}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 transition-all flex items-center gap-1.5 shadow"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>予定作成</span>
+                </button>
+              </div>
+
+              <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700 overflow-x-auto max-w-full">
+                <button
+                  onClick={() => setActiveTab('events')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                    activeTab === 'events' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <CalendarIcon className="w-3.5 h-3.5" />
+                  <span>予定・出欠</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('member_batch')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                    activeTab === 'member_batch' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>メンバー別一括回答</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('members')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                    activeTab === 'members' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>選手名簿 ({members.length})</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* 緊急お知らせバナー */}
+      {alertEvents.length > 0 && (
+        <div className="bg-rose-600 text-white shadow-md border-b border-rose-700">
+          <div className="max-w-7xl mx-auto px-4 py-2.5 flex items-center gap-3">
+            <div className="p-1.5 bg-white/20 rounded-lg shrink-0 animate-bounce">
+              <Bell className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex-1 text-xs sm:text-sm font-bold overflow-hidden">
+              <span className="bg-white text-rose-700 px-2 py-0.5 rounded text-xs mr-2 font-black">【重要連絡】</span>
+              {alertEvents.map(e => (
+                <span 
+                  key={e.id} 
+                  onClick={() => handleSelectEvent(e.id)} 
+                  className="underline cursor-pointer mr-4 hover:text-rose-100 inline-block"
+                >
+                  {e.date} {e.title} → 【{STATUS_TYPES.find(s=>s.id===e.status)?.name}】
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* フィルターバー */}
+      {activeTab === 'events' && (
+        <div className="sticky top-[100px] sm:top-[108px] z-20 bg-slate-100/95 backdrop-blur-md pt-3 pb-2 border-b border-slate-200/80">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6">
+            <div className="bg-white p-2.5 sm:p-3 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                <Search className="w-4 h-4 text-slate-400 shrink-0" />
+                <input
+                  type="text"
+                  placeholder="予定名、場所、説明で検索..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full text-xs sm:text-sm bg-transparent border-none focus:outline-none text-slate-800 placeholder-slate-400 font-medium"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap text-xs">
+                <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                  <GraduationCap className="w-3.5 h-3.5 text-slate-500" />
+                  <select
+                    value={selectedGradeFilter}
+                    onChange={(e) => setSelectedGradeFilter(e.target.value)}
+                    className="bg-transparent font-bold text-slate-700 focus:outline-none cursor-pointer"
+                  >
+                    <option value="ALL">全学年</option>
+                    {GRADES.map(g => (<option key={g} value={g}>{g}</option>))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                  <Filter className="w-3.5 h-3.5 text-slate-500" />
+                  <select
+                    value={selectedTypeFilter}
+                    onChange={(e) => setSelectedTypeFilter(e.target.value)}
+                    className="bg-transparent font-bold text-slate-700 focus:outline-none cursor-pointer"
+                  >
+                    <option value="ALL">全種別</option>
+                    {EVENT_TYPES.map(t => (<option key={t.id} value={t.id}>{t.name}</option>))}
+                  </select>
+                </div>
+
+                <div className="flex items-center bg-slate-100 p-1 border border-slate-200 rounded-lg">
+                  <button
+                    onClick={() => setViewMode('list')}
+                    className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'bg-white text-emerald-800 shadow-xs font-bold' : 'text-slate-500'}`}
+                  >
+                    <List className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('calendar')}
+                    className={`p-1.5 rounded-md transition-all ${viewMode === 'calendar' ? 'bg-white text-emerald-800 shadow-xs font-bold' : 'text-slate-500'}`}
+                  >
+                    <Grid className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* メインコンテンツ */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5">
+        {/* タブ1: 予定・出欠 */}
+        {activeTab === 'events' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-4">
+              {viewMode === 'list' ? (
+                <div className="space-y-3">
+                  {filteredEvents.length === 0 ? (
+                    <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-sm">
+                      <Trophy className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                      <p className="text-slate-600 font-bold">該当する予定がありません</p>
+                    </div>
+                  ) : (
+                    filteredEvents.map(event => {
+                      const summary = getAttendanceSummary(event);
+                      const isSelected = selectedEventId === event.id;
+                      const typeObj = EVENT_TYPES.find(t => t.id === event.type) || EVENT_TYPES[0];
+                      const statusObj = STATUS_TYPES.find(s => s.id === event.status) || STATUS_TYPES[0];
+
+                      return (
+                        <div
+                          key={event.id}
+                          onClick={() => handleSelectEvent(event.id)}
+                          className={`rounded-2xl border transition-all cursor-pointer p-4 sm:p-5 shadow-sm hover:shadow-md ${statusObj.cardBg} ${
+                            isSelected ? 'border-emerald-500 ring-2 ring-emerald-300' : 'border-slate-200'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className={`px-2.5 py-0.5 rounded-md text-xs font-bold border ${typeObj.badgeBg}`}>
+                                {typeObj.name}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded-md text-xs border ${statusObj.badgeClass}`}>
+                                {statusObj.name}
+                              </span>
+                              <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
+                                {event.date}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                                <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                                {event.startTime} - {event.endTime}
+                              </span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setEditingEvent(event); setNewEvent({ ...event }); setIsEventModalOpen(true); }}
+                                className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <h3 className="text-base font-black text-slate-900 mb-2">
+                            {event.title}
+                          </h3>
+
+                          <div className="flex flex-wrap items-center gap-y-1 gap-x-4 text-xs text-slate-600 mb-3">
+                            <div className="flex items-center gap-1">
+                              <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>{event.location || '場所未定'}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <GraduationCap className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>対象: {Array.isArray(event.targetGrades) ? event.targetGrades.join(', ') : event.targetGrades}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between pt-3 border-t border-slate-200/80 text-xs">
+                            <div className="flex flex-wrap items-center gap-1.5 font-bold">
+                              <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
+                                <Car className="w-3 h-3" /> 車出 {summary.attending_car}
+                              </span>
+                              <span className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                                出席 {summary.attending}
+                              </span>
+                              <span className="text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
+                                欠席 {summary.absent}
+                              </span>
+                              <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                                未定 {summary.pending}
+                              </span>
+                            </div>
+
+                            <span className="text-slate-700 font-extrabold bg-slate-200/60 px-2 py-0.5 rounded">
+                              対象選手 {summary.total}名
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ) : (
+                /* カレンダービュー */
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-bold text-slate-900 text-base sm:text-lg flex items-center gap-2">
+                      <CalendarIcon className="w-5 h-5 text-emerald-600" /> {calendarGrid.year}年 {calendarGrid.month}月
+                    </h2>
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => setCalendarDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-700">
+                        <ChevronLeft className="w-5 h-5" />
+                      </button>
+                      <button onClick={() => setCalendarDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-700">
+                        <ChevronRight className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1 text-center text-xs font-black text-slate-400 mb-2">
+                    <div className="text-rose-500">日</div>
+                    <div>月</div>
+                    <div>火</div>
+                    <div>水</div>
+                    <div>木</div>
+                    <div>金</div>
+                    <div className="text-sky-500">土</div>
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1">
+                    {calendarGrid.blanks.map((_, i) => (
+                      <div key={`blank-${i}`} className="h-20 sm:h-24 bg-slate-50/50 rounded-lg" />
+                    ))}
+                    {calendarGrid.days.map(dayNum => {
+                      const mStr = calendarGrid.month < 10 ? `0${calendarGrid.month}` : calendarGrid.month;
+                      const dStr = dayNum < 10 ? `0${dayNum}` : dayNum;
+                      const dateStr = `${calendarGrid.year}-${mStr}-${dStr}`;
+                      const dayEvents = filteredEvents.filter(e => e.date === dateStr);
+
+                      return (
+                        <div key={dayNum} className="h-20 sm:h-24 border border-slate-100 rounded-lg p-1 flex flex-col justify-between hover:bg-emerald-50/40">
+                          <span className="text-xs font-bold text-slate-700">{dayNum}</span>
+                          <div className="space-y-1 overflow-y-auto">
+                            {dayEvents.map(ev => (
+                              <button
+                                key={ev.id}
+                                onClick={() => handleSelectEvent(ev.id)}
+                                className={`w-full text-left px-1.5 py-0.5 rounded text-[10px] font-bold truncate block ${
+                                  selectedEventId === ev.id ? 'bg-emerald-600 text-white' : 'bg-emerald-100 text-emerald-900'
+                                }`}
+                              >
+                                {ev.title}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 右側：出欠入力パネル */}
+            <div className="lg:col-span-1" ref={attendancePanelRef}>
+              {selectedEvent ? (
+                <div className="bg-white rounded-2xl border-2 border-emerald-500 p-5 sticky top-[210px] shadow-lg space-y-4">
+                  <div className="flex items-start justify-between border-b border-slate-100 pb-3">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                          {selectedEvent.date}
+                        </span>
+                        <span className="text-xs font-semibold text-slate-500">
+                          {selectedEvent.startTime}〜{selectedEvent.endTime}
+                        </span>
+                      </div>
+                      <h3 className="text-base font-black text-slate-900 leading-snug">
+                        {selectedEvent.title}
+                      </h3>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => { setEditingEvent(selectedEvent); setNewEvent({ ...selectedEvent }); setIsEventModalOpen(true); }}
+                        className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg"
+                      >
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteEvent(selectedEvent.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-slate-600 space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    <div>📍 場所: <span className="font-bold text-slate-800">{selectedEvent.location || '未定'}</span></div>
+                    <div>📝 詳細: <span className="font-bold text-slate-800">{selectedEvent.description || 'なし'}</span></div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider mb-2">
+                      出欠回答 ({currentTargetMembers.length}名)
+                    </h4>
+                    <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+                      {currentTargetMembers.map(member => {
+                        const status = selectedEvent.attendance?.[member.id] || 'attending';
+                        return (
+                          <div key={member.id} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border border-slate-200 gap-2">
+                            <div>
+                              <div className="text-xs font-bold text-slate-900">{member.playerName}</div>
+                              <div className="text-[10px] text-slate-500">{member.grade} / 保護者: {member.parentName}</div>
+                            </div>
+                            <div className="flex items-center gap-1 text-[10px] font-bold">
+                              <button
+                                onClick={() => updateAttendance(selectedEvent.id, member.id, 'attending_car')}
+                                className={`px-2 py-1 rounded-md border transition-all ${status === 'attending_car' ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200'}`}
+                              >
+                                車出
+                              </button>
+                              <button
+                                onClick={() => updateAttendance(selectedEvent.id, member.id, 'attending')}
+                                className={`px-2 py-1 rounded-md border transition-all ${status === 'attending' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200'}`}
+                              >
+                                出席
+                              </button>
+                              <button
+                                onClick={() => updateAttendance(selectedEvent.id, member.id, 'absent')}
+                                className={`px-2 py-1 rounded-md border transition-all ${status === 'absent' ? 'bg-rose-600 text-white border-rose-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200'}`}
+                              >
+                                欠席
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500 font-bold text-xs">
+                  予定を選択してください
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* タブ2: メンバー別一括回答 */}
+        {activeTab === 'member_batch' && (
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-3 pb-3 border-b border-slate-100">
+              <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <UserCheck className="w-5 h-5 text-emerald-600" /> メンバー別一括出欠回答
+              </h2>
+              <select
+                value={selectedMemberForBatch}
+                onChange={(e) => setSelectedMemberForBatch(e.target.value)}
+                className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-800 focus:outline-none"
+              >
+                {members.map(m => (
+                  <option key={m.id} value={m.id}>{m.playerName} ({m.grade})</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-3">
+              {eventsForSelectedMember.length === 0 ? (
+                <p className="text-xs text-slate-500 font-bold text-center py-8">対象となる予定がありません</p>
+              ) : (
+                eventsForSelectedMember.map(ev => {
+                  const member = members.find(m => m.id === selectedMemberForBatch);
+                  const status = ev.attendance?.[selectedMemberForBatch] || 'attending';
+                  return (
+                    <div key={ev.id} className="flex items-center justify-between bg-slate-50 p-4 rounded-xl border border-slate-200 gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-bold text-slate-500">{ev.date}</span>
+                          <span className="text-xs font-semibold text-slate-400">{ev.startTime}〜{ev.endTime}</span>
+                        </div>
+                        <h4 className="text-sm font-black text-slate-900">{ev.title}</h4>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-xs font-bold">
+                        <button
+                          onClick={() => updateAttendance(ev.id, selectedMemberForBatch, 'attending_car')}
+                          className={`px-3 py-1.5 rounded-lg border transition-all ${status === 'attending_car' ? 'bg-emerald-600 text-white border-emerald-600 shadow' : 'bg-white text-slate-700 border-slate-200'}`}
+                        >
+                          車出
+                        </button>
+                        <button
+                          onClick={() => updateAttendance(ev.id, selectedMemberForBatch, 'attending')}
+                          className={`px-3 py-1.5 rounded-lg border transition-all ${status === 'attending' ? 'bg-blue-600 text-white border-blue-600 shadow' : 'bg-white text-slate-700 border-slate-200'}`}
+                        >
+                          出席
+                        </button>
+                        <button
+                          onClick={() => updateAttendance(ev.id, selectedMemberForBatch, 'absent')}
+                          className={`px-3 py-1.5 rounded-lg border transition-all ${status === 'absent' ? 'bg-rose-600 text-white border-rose-600 shadow' : 'bg-white text-slate-700 border-slate-200'}`}
+                        >
+                          欠席
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* タブ3: 選手名簿 */}
+        {activeTab === 'members' && (
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+            <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+              <Users className="w-5 h-5 text-emerald-600" /> 登録選手一覧 ({members.length}名)
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {members.map(m => (
+                <div key={m.id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        {m.grade}
+                      </span>
+                      <span className="text-xs text-slate-400">{m.kana}</span>
+                    </div>
+                    <div className="text-sm font-black text-slate-900">{m.playerName}</div>
+                    <div className="text-xs text-slate-500 mt-1">保護者: {m.parentName}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* 予定作成・編集モーダル */}
+      {isEventModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-black text-slate-900">
+              {editingEvent ? '予定の編集' : '新規予定の作成'}
+            </h3>
+            <form onSubmit={handleSaveEvent} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">予定タイトル</label>
+                <input
+                  type="text"
+                  required
+                  value={newEvent.title}
+                  onChange={e => setNewEvent({...newEvent, title: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  placeholder="例: 通常練習 (1年〜3年)"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">種別</label>
+                  <select
+                    value={newEvent.type}
+                    onChange={e => setNewEvent({...newEvent, type: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  >
+                    {EVENT_TYPES.map(t => (<option key={t.id} value={t.id}>{t.name}</option>))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">ステータス</label>
+                  <select
+                    value={newEvent.status}
+                    onChange={e => setNewEvent({...newEvent, status: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  >
+                    {STATUS_TYPES.map(s => (<option key={s.id} value={s.id}>{s.name}</option>))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">日付</label>
+                  <input
+                    type="date"
+                    required
+                    value={newEvent.date}
+                    onChange={e => setNewEvent({...newEvent, date: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-medium text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">開始時間</label>
+                  <input
+                    type="time"
+                    required
+                    value={newEvent.startTime}
+                    onChange={e => setNewEvent({...newEvent, startTime: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-medium text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">終了時間</label>
+                  <input
+                    type="time"
+                    required
+                    value={newEvent.endTime}
+                    onChange={e => setNewEvent({...newEvent, endTime: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-medium text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">場所</label>
+                <input
+                  type="text"
+                  value={newEvent.location}
+                  onChange={e => setNewEvent({...newEvent, location: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  placeholder="例: 錦岡小T"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">対象学年（複数選択可）</label>
+                <div className="flex flex-wrap gap-2">
+                  {GRADES.map(g => {
+                    const isSelected = newEvent.targetGrades.includes(g);
+                    return (
+                      <button
+                        type="button"
+                        key={g}
+                        onClick={() => {
+                          const grades = isSelected 
+                            ? newEvent.targetGrades.filter(x => x !== g)
+                            : [...newEvent.targetGrades, g];
+                          setNewEvent({...newEvent, targetGrades: grades});
+                        }}
+                        className={`px-3 py-1.5 rounded-lg border font-bold transition-all ${isSelected ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-slate-50 text-slate-700 border-slate-200'}`}
+                      >
+                        {g}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">詳細・担当者メモ</label>
+                <textarea
+                  value={newEvent.description}
+                  onChange={e => setNewEvent({...newEvent, description: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800 h-20 resize-none"
+                  placeholder="例: 担当: 手塚 / 中村"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEventModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow"
+                >
+                  保存する
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 選手登録モーダル */}
+      {isMemberModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
+            <h3 className="text-lg font-black text-slate-900">新メンバー（選手）登録</h3>
+            <form onSubmit={handleCreateMember} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">選手氏名</label>
+                <input
+                  type="text"
+                  required
+                  value={newMember.playerName}
+                  onChange={e => setNewMember({...newMember, playerName: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  placeholder="例: 山田 太陽"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">ふりがな</label>
+                <input
+                  type="text"
+                  required
+                  value={newMember.kana}
+                  onChange={e => setNewMember({...newMember, kana: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  placeholder="例: やまだ たいよう"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">学年</label>
+                <select
+                  value={newMember.grade}
+                  onChange={e => setNewMember({...newMember, grade: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                >
+                  {GRADES.map(g => (<option key={g} value={g}>{g}</option>))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">保護者氏名</label>
+                <input
+                  type="text"
+                  required
+                  value={newMember.parentName}
+                  onChange={e => setNewMember({...newMember, parentName: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  placeholder="例: 山田 太郎"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsMemberModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow"
+                >
+                  登録する
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
